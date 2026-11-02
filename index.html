@@ -120,11 +120,12 @@ button:active{transform:scale(.98);}
 .vline{position:relative;}
 .vmarks{position:absolute;inset:0;z-index:0;pointer-events:none;}
 .vtext{position:relative;z-index:1;user-select:none;-webkit-user-select:none;}
-.poem-view.bold-mode .vtext{user-select:text;-webkit-user-select:text;cursor:text;}
-.poem-view:not(.bold-mode) .vtext .ch.live{cursor:pointer;}
+.poem-view.style-mode .vtext{user-select:text;-webkit-user-select:text;cursor:text;}
+.poem-view:not(.style-mode) .vtext .ch.live{cursor:pointer;}
 .mk{position:absolute;pointer-events:none;}
 .hov{position:absolute;pointer-events:none;border:1px dashed var(--ink-soft);border-radius:3px;z-index:2;}
 .ch.bd{font-weight:700;}
+.ch.it{font-style:italic;}
 .w.guessed .ch{text-decoration:underline dotted var(--gold);text-decoration-thickness:1.5px;text-underline-offset:.28em;}
 #tip{
   position:fixed;z-index:60;pointer-events:none;display:none;
@@ -151,6 +152,10 @@ button:active{transform:scale(.98);}
 .unmapped-note{font-size:.82rem;color:var(--ink-soft);margin-top:.9rem;}
 footer{text-align:center;color:var(--ink-soft);font-size:.78rem;margin-top:3rem;}
 footer p{margin:.3rem auto;max-width:70ch;}
+
+#filter-row{display:flex;flex-wrap:wrap;gap:.45rem;align-items:center;margin:0 0 .9rem;}
+#filter-row .flab{font-size:.85rem;font-weight:600;color:var(--ink-soft);margin-right:.2rem;}
+#filter-row button{padding:.35rem .8rem;font-size:.82rem;}
 
 </style>
 </head>
@@ -197,15 +202,27 @@ footer p{margin:.3rem auto;max-width:70ch;}
       <strong>Left-click</strong> a sound to mark it; click again to unmark. Hover first to see which letters a click will mark.
       <strong>Right-click</strong> (or long-press) for options: change the sound, adjust which letters it covers, or choose another pronunciation of the word.
       Right-click letters with no sound, such as a silent <em>e</em>, to give them one. Words underlined with dots were guessed from their spelling.
-      Turn <strong>Bold</strong> on, then drag across letters to bold words that disrupt the pattern; right-click bold letters to remove it, or drag across them again.
+      Turn <strong>Bold</strong> or <strong>Italics</strong> on, then drag across letters to style words that disrupt the pattern; right-click styled letters to remove it, or drag across them again.
+      <strong>Show only</strong> hides every mark outside the groups you pick (groups can be combined); hidden sounds are not clickable until you show them again.
       <strong>Save work</strong> downloads a small file with the poem, your marks, bold, and sound corrections; reopen it later with <strong>Open saved work</strong> at the top of this page.
     </p>
     <div class="btnrow" style="margin:.4rem 0 .9rem;">
       <button class="secondary" id="bold-btn" aria-pressed="false">Bold: off</button>
+      <button class="secondary" id="ital-btn" aria-pressed="false">Italics: off</button>
       <button class="secondary" id="clear-btn">Clear marks</button>
       <button class="secondary" id="save-btn">Save work</button>
       <button class="secondary" id="jpg-btn">Download as JPG</button>
       <button class="secondary" id="reset-btn">Start over</button>
+    </div>
+    <div id="filter-row" role="group" aria-label="Show only some sounds">
+      <span class="flab">Show only:</span>
+      <button class="secondary" data-group="vowels" aria-pressed="false">Vowels</button>
+      <button class="secondary" data-group="labials" aria-pressed="false">Labials</button>
+      <button class="secondary" data-group="dentals" aria-pressed="false">Dentals</button>
+      <button class="secondary" data-group="plosives" aria-pressed="false">Plosives</button>
+      <button class="secondary" data-group="sibilants" aria-pressed="false">Sibilants</button>
+      <button class="secondary" data-group="fricatives" aria-pressed="false">Fricatives</button>
+      <button class="secondary" id="filter-all">Show all</button>
     </div>
     <div class="poem-view" id="poem-view"></div>
   </section>
@@ -147635,10 +147652,11 @@ function guessUnits(L){
 /* ================= poem data ================= */
 let poem = [];          // stanzas > lines > tokens
 let WORDS = [];
-let boldMode = false;
+let styleMode = null;            // null, "bold" or "ital": which letter style a drag applies
+const activeGroups = new Set();   // sound groups chosen in the "Show only" row; empty = show everything
 
 function makeWord(raw){
-  const w = {type:"word", id:WORDS.length, raw, L:norm(raw), prons:null, pi:0, guessed:false, units:[], bold:new Array(raw.length).fill(false)};
+  const w = {type:"word", id:WORDS.length, raw, L:norm(raw), prons:null, pi:0, guessed:false, units:[], bold:new Array(raw.length).fill(false), ital:new Array(raw.length).fill(false)};
   WORDS.push(w);
   let prons = lookup(raw);
   if(prons && prons.length){ w.prons = prons; w.units = buildUnits(w.L, prons[0]); }
@@ -147660,6 +147678,21 @@ function parsePoem(opts){
   $("mark-section").style.display = "block";
   renderPoem();
   $("mark-section").scrollIntoView({behavior:"smooth", block:"start"});
+}
+
+/* ================= showing only some sounds ================= */
+const GROUPS = {
+  vowels:     sym => INFO[sym].kind !== "c",
+  labials:    sym => ["p","b","f","v","m","w","hw"].includes(sym),
+  dentals:    sym => ["t","d","θ","ð","n","l"].includes(sym),
+  plosives:   sym => ["p","b","t","d","k","g"].includes(sym),
+  sibilants:  sym => ["s","z","sh","ʒ","ch","j"].includes(sym),
+  fricatives: sym => ["f","v","θ","ð","s","z","sh","ʒ"].includes(sym)
+};
+function symVisible(sym){
+  if(!activeGroups.size) return true;
+  for(const g of activeGroups) if(GROUPS[g](sym)) return true;
+  return false;
 }
 
 /* ================= drawing the poem ================= */
@@ -147693,7 +147726,8 @@ function refreshLetters(){
   document.querySelectorAll("#poem-view .ch").forEach(c => {
     const w = WORDS[+c.dataset.w], i = +c.dataset.i;
     c.classList.toggle("bd", !!w.bold[i]);
-    c.classList.toggle("live", w.units.some(u => u.sym && !u.silent && u.s <= i && i < u.e));
+    c.classList.toggle("it", !!w.ital[i]);
+    c.classList.toggle("live", w.units.some(u => u.sym && !u.silent && symVisible(u.sym) && u.s <= i && i < u.e));
   });
 }
 function unitRect(wEl, u, lr){
@@ -147712,7 +147746,7 @@ function positionLine(lEl){
   lEl._words.forEach(w => {
     const wEl = lEl.querySelector('.w[data-w="' + w.id + '"]');
     w.units.forEach(u => {
-      if(!u.marked || !u.sym || u.silent) return;
+      if(!u.marked || !u.sym || u.silent || !symVisible(u.sym)) return;
       const r = unitRect(wEl, u, lr); if(!r) return;
       const m = document.createElement("div");
       m.className = "mk " + markClass(u.sym); markVars(m, u.sym);
@@ -147727,7 +147761,7 @@ let rafPending = false;
 function schedulePosition(){ if(rafPending) return; rafPending = true; requestAnimationFrame(() => { rafPending = false; positionAll(); }); }
 
 /* ================= clicking: find the sound under the pointer ================= */
-function unitsAt(w, i, includeSilent){ return w.units.filter(u => u.sym && u.s <= i && i < u.e && (includeSilent || !u.silent)); }
+function unitsAt(w, i, includeSilent){ return w.units.filter(u => u.sym && u.s <= i && i < u.e && (includeSilent || (!u.silent && symVisible(u.sym)))); }
 function pickUnit(w, chEl, cands, clientX){
   if(cands.length === 1) return cands[0];
   // letters that carry two sounds (x = k + s; the u in "use" = y + uː): left part first sound, right part second
@@ -147744,7 +147778,7 @@ let hovLine = null, hovEl = null;
 function clearHover(){ if(hovEl){ hovEl.remove(); hovEl = null; } tip.style.display = "none"; }
 function onMove(ev){
   const chEl = ev.target.closest && ev.target.closest(".ch");
-  if(!chEl || boldMode){ clearHover(); return; }
+  if(!chEl || styleMode){ clearHover(); return; }
   const w = WORDS[+chEl.dataset.w], i = +chEl.dataset.i;
   const cands = unitsAt(w, i);
   if(!cands.length){ clearHover(); return; }
@@ -147760,7 +147794,7 @@ function onMove(ev){
   tip.style.top = (ev.clientY + 18) + "px";
 }
 function onClick(ev){
-  if(boldMode || longPressed){ longPressed = false; return; }
+  if(styleMode || longPressed){ longPressed = false; return; }
   const chEl = ev.target.closest && ev.target.closest(".ch");
   if(!chEl) return;
   const w = WORDS[+chEl.dataset.w], i = +chEl.dataset.i;
@@ -147771,7 +147805,7 @@ function onClick(ev){
   onMove(ev);
 }
 
-/* ================= bold: drag over letters while the Bold button is on ================= */
+/* ================= bold and italics: drag over letters while the matching button is on ================= */
 function selectedLetters(){
   const sel = window.getSelection();
   if(!sel || sel.rangeCount === 0 || sel.isCollapsed) return [];
@@ -147779,23 +147813,32 @@ function selectedLetters(){
   return [...document.querySelectorAll("#poem-view .ch")].filter(c => range.intersectsNode(c));
 }
 function onMouseUp(){
-  if(!boldMode) return;
+  if(!styleMode) return;
   const chs = selectedLetters();
   if(!chs.length) return;
-  const allBold = chs.every(c => WORDS[+c.dataset.w].bold[+c.dataset.i]);
-  chs.forEach(c => { WORDS[+c.dataset.w].bold[+c.dataset.i] = !allBold; });
+  const allOn = chs.every(c => WORDS[+c.dataset.w][styleMode][+c.dataset.i]);
+  chs.forEach(c => { WORDS[+c.dataset.w][styleMode][+c.dataset.i] = !allOn; });
   window.getSelection().removeAllRanges();
   refreshLetters(); positionAll();
 }
-function boldRun(chEl, wholeRun){
-  // the bold letters touching this one, within its word or (wholeRun) across neighbouring words in the line
+function styleRun(chEl, key, wholeRun){
+  // the letters in this style touching this one, within its word or (wholeRun) across neighbouring words in the line
   const line = chEl.closest(".vline"), all = [...line.querySelectorAll(".ch")];
-  const isB = c => WORDS[+c.dataset.w].bold[+c.dataset.i];
+  const isOn = c => WORDS[+c.dataset.w][key][+c.dataset.i];
   let a = all.indexOf(chEl), b = a;
   const sameWord = (x, y) => x.dataset.w === y.dataset.w;
-  while(a > 0 && isB(all[a-1]) && (wholeRun || sameWord(all[a-1], chEl))) a--;
-  while(b < all.length - 1 && isB(all[b+1]) && (wholeRun || sameWord(all[b+1], chEl))) b++;
+  while(a > 0 && isOn(all[a-1]) && (wholeRun || sameWord(all[a-1], chEl))) a--;
+  while(b < all.length - 1 && isOn(all[b+1]) && (wholeRun || sameWord(all[b+1], chEl))) b++;
   return all.slice(a, b + 1);
+}
+function setStyleMode(mode){
+  styleMode = (styleMode === mode) ? null : mode;
+  $("bold-btn").setAttribute("aria-pressed", String(styleMode === "bold"));
+  $("ital-btn").setAttribute("aria-pressed", String(styleMode === "ital"));
+  $("bold-btn").textContent = styleMode === "bold" ? "Bold: on (drag over letters)" : "Bold: off";
+  $("ital-btn").textContent = styleMode === "ital" ? "Italics: on (drag over letters)" : "Italics: off";
+  $("poem-view").classList.toggle("style-mode", !!styleMode);
+  clearHover(); window.getSelection().removeAllRanges();
 }
 
 /* ================= right-click menu: change the sound, adjust its letters, remove bold ================= */
@@ -147834,18 +147877,19 @@ function buildMenu(){
   if(unit && !unit.silent) head.querySelectorAll("b")[1].textContent = describe(unit);
   ctx.appendChild(head);
 
-  if(w.bold[i]){
+  [["bold","bold"],["ital","italics"]].forEach(([key, label]) => {
+    if(!w[key][i]) return;
     const row = document.createElement("div"); row.className = "cx-row";
-    const b1 = document.createElement("button"); b1.className = "cx"; b1.textContent = "Remove bold (this word)";
-    b1.onclick = () => { boldRun(ctxState.chEl, false).forEach(c => { WORDS[+c.dataset.w].bold[+c.dataset.i] = false; }); afterChange(); };
+    const b1 = document.createElement("button"); b1.className = "cx"; b1.textContent = "Remove " + label + " (this word)";
+    b1.onclick = () => { styleRun(ctxState.chEl, key, false).forEach(c => { WORDS[+c.dataset.w][key][+c.dataset.i] = false; }); afterChange(); };
     row.appendChild(b1);
-    if(boldRun(ctxState.chEl, true).length > boldRun(ctxState.chEl, false).length){
-      const b2 = document.createElement("button"); b2.className = "cx"; b2.textContent = "Remove bold (whole run)";
-      b2.onclick = () => { boldRun(ctxState.chEl, true).forEach(c => { WORDS[+c.dataset.w].bold[+c.dataset.i] = false; }); afterChange(); };
+    if(styleRun(ctxState.chEl, key, true).length > styleRun(ctxState.chEl, key, false).length){
+      const b2 = document.createElement("button"); b2.className = "cx"; b2.textContent = "Remove " + label + " (whole run)";
+      b2.onclick = () => { styleRun(ctxState.chEl, key, true).forEach(c => { WORDS[+c.dataset.w][key][+c.dataset.i] = false; }); afterChange(); };
       row.appendChild(b2);
     }
     ctx.appendChild(row);
-  }
+  });
   if(unit && !unit.follow){
     const row = document.createElement("div"); row.className = "cx-row";
     const lab = document.createElement("span"); lab.textContent = "Letters this sound covers:  left edge"; row.appendChild(lab);
@@ -147963,12 +148007,12 @@ function downloadJpg(){
   let node;
   while((node = walker.nextNode())){
     if(!node.parentElement.closest(".vtext")) continue;
-    const bold = node.parentElement.classList.contains("bd");
+    const bold = node.parentElement.classList.contains("bd"), ital = node.parentElement.classList.contains("it");
     for(let k = 0; k < node.data.length; k++){
       if(/\s/.test(node.data[k])) continue;
       range.setStart(node, k); range.setEnd(node, k + 1);
       const r = range.getBoundingClientRect();
-      if(r.width) chars.push({ch:node.data[k], x:r.left - rr.left, y:r.top - rr.top + ascent, w:r.width, bold});
+      if(r.width) chars.push({ch:node.data[k], x:r.left - rr.left, y:r.top - rr.top + ascent, w:r.width, bold, ital});
     }
   }
   const marks = [...root.querySelectorAll(".mk")].map(el => {
@@ -147987,7 +148031,7 @@ function downloadJpg(){
   marks.forEach(m => { if(INFO[m.sym].kind !== "c") drawFill(ctx2, m.r, m.sym); });          // vowel fills behind the text
   marks.forEach((m, k) => { if(INFO[m.sym].kind === "c") drawOutline(ctx2, m.r, m.sym, mulberry32(1234 + k * 77)); });
   ctx2.textBaseline = "alphabetic"; ctx2.fillStyle = cs.color;
-  chars.forEach(c => { ctx2.font = cs.fontStyle + " " + (c.bold ? "700" : "400") + " " + cs.fontSize + " " + cs.fontFamily; ctx2.fillText(c.ch, c.x, c.y); });
+  chars.forEach(c => { ctx2.font = (c.ital ? "italic" : cs.fontStyle) + " " + (c.bold ? "700" : "400") + " " + cs.fontSize + " " + cs.fontFamily; ctx2.fillText(c.ch, c.x, c.y); });
   canvas.toBlob(blob => {
     if(!blob) return;
     const url = URL.createObjectURL(blob), a = document.createElement("a");
@@ -148002,7 +148046,7 @@ function saveWork(){
     app:"alliteration-marker", version:1, saved:new Date().toISOString(),
     poem:$("poem-input").value,
     words:WORDS.map(w => ({
-      raw:w.raw, pi:w.pi, bold:w.bold.map(b => b ? 1 : 0).join(""),
+      raw:w.raw, pi:w.pi, bold:w.bold.map(b => b ? 1 : 0).join(""), ital:w.ital.map(b => b ? 1 : 0).join(""),
       units:w.units.map(u => ({sym:u.sym, s:u.s, e:u.e, m:u.marked ? 1 : 0, x:u.silent ? 1 : 0, f:u.follow ? w.units.indexOf(u.follow) : -1}))
     }))
   };
@@ -148030,6 +148074,7 @@ function openWork(file){
         units.forEach(u => { u.follow = (u._f >= 0 && sv.units[u._f] && units.find(v => v.s === sv.units[u._f].s && v.sym === sv.units[u._f].sym)) || null; delete u._f; });
         w.units = units;
         if(typeof sv.bold === "string" && sv.bold.length === w.raw.length) w.bold = [...sv.bold].map(c => c === "1");
+        if(typeof sv.ital === "string" && sv.ital.length === w.raw.length) w.ital = [...sv.ital].map(c => c === "1");
       });
     }});
     msg.textContent = "Opened " + file.name + ".";
@@ -148039,12 +148084,18 @@ function openWork(file){
 /* ================= wiring ================= */
 buildLegend();
 $("parse-btn").addEventListener("click", () => parsePoem());
-$("bold-btn").addEventListener("click", () => {
-  boldMode = !boldMode;
-  $("bold-btn").setAttribute("aria-pressed", String(boldMode));
-  $("bold-btn").textContent = boldMode ? "Bold: on (drag over letters)" : "Bold: off";
-  $("poem-view").classList.toggle("bold-mode", boldMode);
-  clearHover(); window.getSelection().removeAllRanges();
+$("bold-btn").addEventListener("click", () => setStyleMode("bold"));
+$("ital-btn").addEventListener("click", () => setStyleMode("ital"));
+document.querySelectorAll("#filter-row button[data-group]").forEach(btn => btn.addEventListener("click", () => {
+  const g = btn.dataset.group;
+  if(activeGroups.has(g)) activeGroups.delete(g); else activeGroups.add(g);
+  btn.setAttribute("aria-pressed", String(activeGroups.has(g)));
+  clearHover(); refreshLetters(); positionAll();
+}));
+$("filter-all").addEventListener("click", () => {
+  activeGroups.clear();
+  document.querySelectorAll("#filter-row button[data-group]").forEach(btn => btn.setAttribute("aria-pressed", "false"));
+  clearHover(); refreshLetters(); positionAll();
 });
 $("clear-btn").addEventListener("click", () => { WORDS.forEach(w => w.units.forEach(u => { u.marked = false; })); positionAll(); });
 $("jpg-btn").addEventListener("click", downloadJpg);

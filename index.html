@@ -169,6 +169,13 @@ footer p{margin:.3rem auto;max-width:70ch;}
 @media (min-width:760px){ .poem-view{padding-right:12.5rem;} .smeter{right:-11.5rem;} }
 @media (max-width:759px){ .smeter{position:static;width:auto;justify-content:flex-start;margin-bottom:.2rem;} .smeter .note{width:auto;text-align:left;} }
 
+[hidden]{display:none !important;}
+#edit-overlay{position:fixed;inset:0;z-index:70;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;padding:1rem;}
+.edit-card{background:var(--paper-raised);color:var(--ink);border:1px solid var(--line);border-radius:12px;padding:1.1rem 1.2rem 1.2rem;width:min(46rem,100%);max-height:94vh;display:flex;flex-direction:column;box-shadow:0 14px 40px rgba(0,0,0,.35);}
+.edit-card h3{font-family:var(--serif);font-size:1.15rem;margin:0 0 .3rem;}
+.edit-card textarea{min-height:46vh;flex:1;}
+#edit-msg{font-size:.82rem;color:var(--ink-soft);margin:.1rem 0 .6rem;min-height:1.1em;}
+
 </style>
 </head>
 <body>
@@ -210,7 +217,7 @@ footer p{margin:.3rem auto;max-width:70ch;}
         <option value="dactylic">Dactylic</option>
       </select>
     </div>
-    <p class="hint">Bold letters mark stressed syllables. Multi-syllable words keep their dictionary stress; the meter decides which one-syllable words (and secondary-stress syllables) count as stressed. Each stanza can override this in step 2.</p>
+    <p class="hint">Bold letters mark stressed syllables. Multi-syllable words keep their dictionary stress; the meter decides which one-syllable words (and secondary-stress syllables) count as stressed. Each stanza can override this in step 2. Once you have started marking, change the text with <strong>Edit poem text</strong> in step 2 (re-pasting here starts over).</p>
     <div class="btnrow">
       <button class="primary" id="parse-btn">Match sounds to letters</button>
       <button class="secondary" id="open-btn">Open saved work</button>
@@ -232,6 +239,7 @@ footer p{margin:.3rem auto;max-width:70ch;}
     </p>
     <div class="toolbar" id="toolbar">
     <div class="btnrow">
+      <button class="secondary" id="edit-btn">Edit poem text</button>
       <button class="secondary" id="stress-btn" aria-pressed="false">Edit stress: off</button>
       <button class="secondary" id="ital-btn" aria-pressed="false">Italics: off</button>
       <button class="secondary" id="clear-btn">Clear marks</button>
@@ -250,6 +258,7 @@ footer p{margin:.3rem auto;max-width:70ch;}
       <button class="secondary" id="filter-all">Show all</button>
     </div>
     </div>
+    <div id="edit-msg"></div>
     <div class="poem-view" id="poem-view"></div>
   </section>
 
@@ -260,6 +269,17 @@ footer p{margin:.3rem auto;max-width:70ch;}
   </footer>
 </div>
 
+<div id="edit-overlay" hidden>
+  <div class="edit-card" role="dialog" aria-label="Edit poem text">
+    <h3>Edit poem text</h3>
+    <p class="hint" style="margin:0 0 .6rem">Change words or line breaks. Marks, stress edits and italics stay on every word you leave alone, and on lightly retyped words (typo fixes) wherever the sound is unchanged. New or rewritten words are matched fresh.</p>
+    <textarea id="edit-text"></textarea>
+    <div class="btnrow">
+      <button class="primary" id="edit-apply">Apply changes</button>
+      <button class="secondary" id="edit-cancel">Cancel</button>
+    </div>
+  </div>
+</div>
 <div id="ctx" role="menu"></div>
 <div id="tip"></div>
 
@@ -147807,10 +147827,7 @@ function makeWord(raw){
   else { w.guessed = true; w.units = guessUnits(w.L); const f = w.units.find(u => INFO[u.sym].kind !== "c"); if(f) f.st = 1; }
   return w;
 }
-function parsePoem(opts){
-  const text = $("poem-input").value.replace(/\r/g, "").trim();
-  if(!text) return;
-  ensureDict();
+function parseText(text){
   WORDS = []; poem = [];
   text.split(/\n\s*\n/).forEach(st => {
     poem.push(st.split("\n").map(l => l.trim()).filter(Boolean).map(lt => {
@@ -147819,12 +147836,80 @@ function parsePoem(opts){
     }));
   });
   stanzaMeta = poem.map(() => ({override:"", meter:"iambic", detected:false}));
+}
+function parsePoem(opts){
+  const text = $("poem-input").value.replace(/\r/g, "").trim();
+  if(!text) return;
+  ensureDict();
+  parseText(text);
   if(opts && opts.restore) opts.restore();
   reapplyAll();
   $("mark-section").style.display = "block";
   renderPoem();
   $("toolbar").scrollIntoView({behavior:"smooth", block:"start"});
 }
+
+/* ================= editing the poem text without losing your work ================= */
+function lev(a, b){
+  const m = a.length, n = b.length; let prev = Array.from({length:n+1}, (_, j) => j);
+  for(let i = 1; i <= m; i++){
+    const cur = [i];
+    for(let j = 1; j <= n; j++) cur[j] = Math.min(prev[j] + 1, cur[j-1] + 1, prev[j-1] + (a[i-1] === b[j-1] ? 0 : 1));
+    prev = cur;
+  }
+  return prev[n];
+}
+function applyTextEdit(text){
+  const oldWords = WORDS, oldPoem = poem, oldMeta = stanzaMeta;
+  const oldStanza = new Map();
+  oldPoem.forEach((st, si) => st.forEach(line => line.forEach(t => { if(t.type === "word") oldStanza.set(t, si); })));
+  parseText(text);
+  const A = oldWords.map(w => norm(w.raw)), B = WORDS.map(w => norm(w.raw)), n = A.length, m = B.length;
+  // words that stayed the same: longest common run of words, in order
+  const dp = Array.from({length:n+1}, () => new Int32Array(m+1));
+  for(let i = n - 1; i >= 0; i--) for(let j = m - 1; j >= 0; j--) dp[i][j] = A[i] === B[j] ? dp[i+1][j+1] + 1 : Math.max(dp[i+1][j], dp[i][j+1]);
+  const pairs = []; { let i = 0, j = 0; while(i < n && j < m){ if(A[i] === B[j]){ pairs.push([i, j]); i++; j++; } else if(dp[i+1][j] >= dp[i][j+1]) i++; else j++; } }
+  const from = new Map();                                    // new word index -> old word
+  let kept = 0, soft = 0;
+  pairs.forEach(([i, j]) => {
+    const o = oldWords[i], w = WORDS[j];
+    w.pi = o.pi; w.units = o.units; w.bold = o.bold; w.manual = o.manual; w.ital = o.ital;
+    from.set(j, o); kept++;
+  });
+  // words retyped a little in the same spot (typo fixes) keep marks on sounds that are still there
+  const anchors = pairs.concat([[n, m]]); let pi = -1, pj = -1;
+  anchors.forEach(([ai, aj]) => {
+    const go = ai - pi - 1, gn = aj - pj - 1;
+    if(go > 0 && go === gn){
+      for(let k = 0; k < go; k++){
+        const o = oldWords[pi + 1 + k], w = WORDS[pj + 1 + k];
+        if(lev(norm(o.raw), norm(w.raw)) > Math.max(1, Math.floor(norm(w.raw).length / 3))) continue;
+        const pool = o.units.filter(u => u.marked && u.sym && !u.silent);
+        w.units.forEach(u => { const q = pool.findIndex(v => v.sym === u.sym); if(q >= 0){ u.marked = true; pool.splice(q, 1); } });
+        if(o.raw.length === w.raw.length) for(let x = 0; x < w.raw.length; x++) if(norm(o.raw)[x] === norm(w.raw)[x]){ w.bold[x] = o.bold[x]; w.manual[x] = o.manual[x]; w.ital[x] = o.ital[x]; }
+        from.set(pj + 1 + k, o); soft++;
+      }
+    }
+    pi = ai; pj = aj;
+  });
+  // each new stanza takes the meter setting of the old stanza most of its words came from
+  poem.forEach((st, si) => {
+    const tally = {};
+    st.forEach(line => line.forEach(t => { if(t.type === "word" && from.has(t.id)){ const os = oldStanza.get(from.get(t.id)); tally[os] = (tally[os] || 0) + 1; } }));
+    const best = Object.keys(tally).sort((x, y) => tally[y] - tally[x])[0];
+    if(best !== undefined && oldMeta[+best]) stanzaMeta[si].override = oldMeta[+best].override;
+  });
+  $("poem-input").value = text;
+  const pv = $("poem-view"), top = pv.scrollTop;
+  reapplyAll(); renderPoem(); pv.scrollTop = top;
+  return {kept, soft, total:WORDS.length};
+}
+function openEditor(){
+  closeMenu(); clearHover();
+  $("edit-text").value = $("poem-input").value;
+  $("edit-overlay").hidden = false; $("edit-text").focus();
+}
+function closeEditor(){ $("edit-overlay").hidden = true; }
 
 /* ================= showing only some sounds ================= */
 const GROUPS = {
@@ -148310,6 +148395,16 @@ $("filter-all").addEventListener("click", () => {
 });
 $("clear-btn").addEventListener("click", () => { WORDS.forEach(w => w.units.forEach(u => { u.marked = false; })); positionAll(); });
 $("jpg-btn").addEventListener("click", downloadJpg);
+$("edit-btn").addEventListener("click", openEditor);
+$("edit-cancel").addEventListener("click", closeEditor);
+$("edit-apply").addEventListener("click", () => {
+  const text = $("edit-text").value.replace(/\r/g, "").trim();
+  if(!text) return;
+  const r = applyTextEdit(text);
+  closeEditor();
+  $("edit-msg").textContent = "Text updated: marks kept on " + r.kept + " unchanged and " + r.soft + " lightly retyped words (of " + r.total + ").";
+});
+$("edit-overlay").addEventListener("mousedown", ev => { if(ev.target === $("edit-overlay")) closeEditor(); });
 $("save-btn").addEventListener("click", saveWork);
 $("open-btn").addEventListener("click", () => $("open-file").click());
 $("open-file").addEventListener("change", ev => { const f = ev.target.files[0]; if(f) openWork(f); ev.target.value = ""; });
@@ -148327,7 +148422,7 @@ pv.addEventListener("touchstart", ev => {                       // long-press op
 }, {passive:true});
 ["touchend","touchmove","touchcancel"].forEach(n => pv.addEventListener(n, () => clearTimeout(pressTimer), {passive:true}));
 document.addEventListener("mousedown", ev => { if(ctxState && !ctx.contains(ev.target)) closeMenu(); });
-document.addEventListener("keydown", ev => { if(ev.key === "Escape") closeMenu(); });
+document.addEventListener("keydown", ev => { if(ev.key === "Escape"){ closeMenu(); closeEditor(); } });
 window.addEventListener("scroll", () => { if(ctxState) closeMenu(); clearHover(); }, {passive:true});
 window.addEventListener("resize", () => { fitBox(); schedulePosition(); });
 if(window.ResizeObserver) new ResizeObserver(schedulePosition).observe(pv);

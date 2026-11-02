@@ -182,10 +182,12 @@ footer p{margin:.3rem auto;max-width:70ch;}
 
   <section>
     <h2>1 · Paste the poem</h2>
-    <p class="hint">Separate stanzas with a blank line, exactly as in the source text.</p>
     <textarea id="poem-input" placeholder="Paste your poem here..."></textarea>
     <div class="btnrow">
       <button class="primary" id="parse-btn">Match sounds to letters</button>
+      <button class="secondary" id="open-btn">Open saved work</button>
+      <input type="file" id="open-file" accept=".json,application/json" hidden>
+      <span class="hint" id="open-msg" style="margin:0"></span>
     </div>
   </section>
 
@@ -196,10 +198,12 @@ footer p{margin:.3rem auto;max-width:70ch;}
       <strong>Right-click</strong> (or long-press) for options: change the sound, adjust which letters it covers, or choose another pronunciation of the word.
       Right-click letters with no sound, such as a silent <em>e</em>, to give them one. Words underlined with dots were guessed from their spelling.
       Turn <strong>Bold</strong> on, then drag across letters to bold words that disrupt the pattern; right-click bold letters to remove it, or drag across them again.
+      <strong>Save work</strong> downloads a small file with the poem, your marks, bold, and sound corrections; reopen it later with <strong>Open saved work</strong> at the top of this page.
     </p>
     <div class="btnrow" style="margin:.4rem 0 .9rem;">
       <button class="secondary" id="bold-btn" aria-pressed="false">Bold: off</button>
       <button class="secondary" id="clear-btn">Clear marks</button>
+      <button class="secondary" id="save-btn">Save work</button>
       <button class="secondary" id="jpg-btn">Download as JPG</button>
       <button class="secondary" id="reset-btn">Start over</button>
     </div>
@@ -147641,7 +147645,7 @@ function makeWord(raw){
   else { w.guessed = true; w.units = guessUnits(w.L); }
   return w;
 }
-function parsePoem(){
+function parsePoem(opts){
   const text = $("poem-input").value.replace(/\r/g, "").trim();
   if(!text) return;
   ensureDict();
@@ -147652,6 +147656,7 @@ function parsePoem(){
       return toks.map(tok => /\p{L}/u.test(tok) ? makeWord(tok) : {type:"text", raw:tok});
     }));
   });
+  if(opts && opts.restore) opts.restore();
   $("mark-section").style.display = "block";
   renderPoem();
   $("mark-section").scrollIntoView({behavior:"smooth", block:"start"});
@@ -147991,9 +147996,49 @@ function downloadJpg(){
   }, "image/jpeg", 0.95);
 }
 
+/* ================= save and reopen your work ================= */
+function saveWork(){
+  const data = {
+    app:"alliteration-marker", version:1, saved:new Date().toISOString(),
+    poem:$("poem-input").value,
+    words:WORDS.map(w => ({
+      raw:w.raw, pi:w.pi, bold:w.bold.map(b => b ? 1 : 0).join(""),
+      units:w.units.map(u => ({sym:u.sym, s:u.s, e:u.e, m:u.marked ? 1 : 0, x:u.silent ? 1 : 0, f:u.follow ? w.units.indexOf(u.follow) : -1}))
+    }))
+  };
+  const blob = new Blob([JSON.stringify(data)], {type:"application/json"});
+  const url = URL.createObjectURL(blob), a = document.createElement("a");
+  a.href = url; a.download = "alliteration-work-" + new Date().toISOString().slice(0, 10) + ".json";
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 2000);
+}
+function openWork(file){
+  const msg = $("open-msg"); msg.textContent = "";
+  file.text().then(txt => {
+    let d; try { d = JSON.parse(txt); } catch(e){ d = null; }
+    if(!d || d.app !== "alliteration-marker" || typeof d.poem !== "string" || !Array.isArray(d.words)){
+      msg.textContent = "That file is not saved work from this tool."; return;
+    }
+    $("poem-input").value = d.poem;
+    parsePoem({restore:() => {
+      WORDS.forEach((w, k) => {
+        const sv = d.words[k];
+        if(!sv || sv.raw !== w.raw) return;                    // the poem text changed: leave that word as freshly matched
+        if(w.prons && Number.isInteger(sv.pi) && sv.pi >= 0 && sv.pi < w.prons.length) w.pi = sv.pi;
+        const units = (sv.units || []).filter(u => INFO[u.sym] && u.s >= 0 && u.e <= w.raw.length && u.e > u.s)
+          .map(u => Object.assign(newUnit(u.sym, u.s, u.e), {marked:!!u.m, silent:!!u.x, _f:u.f}));
+        units.forEach(u => { u.follow = (u._f >= 0 && sv.units[u._f] && units.find(v => v.s === sv.units[u._f].s && v.sym === sv.units[u._f].sym)) || null; delete u._f; });
+        w.units = units;
+        if(typeof sv.bold === "string" && sv.bold.length === w.raw.length) w.bold = [...sv.bold].map(c => c === "1");
+      });
+    }});
+    msg.textContent = "Opened " + file.name + ".";
+  }).catch(() => { msg.textContent = "Could not read that file."; });
+}
+
 /* ================= wiring ================= */
 buildLegend();
-$("parse-btn").addEventListener("click", parsePoem);
+$("parse-btn").addEventListener("click", () => parsePoem());
 $("bold-btn").addEventListener("click", () => {
   boldMode = !boldMode;
   $("bold-btn").setAttribute("aria-pressed", String(boldMode));
@@ -148003,6 +148048,9 @@ $("bold-btn").addEventListener("click", () => {
 });
 $("clear-btn").addEventListener("click", () => { WORDS.forEach(w => w.units.forEach(u => { u.marked = false; })); positionAll(); });
 $("jpg-btn").addEventListener("click", downloadJpg);
+$("save-btn").addEventListener("click", saveWork);
+$("open-btn").addEventListener("click", () => $("open-file").click());
+$("open-file").addEventListener("change", ev => { const f = ev.target.files[0]; if(f) openWork(f); ev.target.value = ""; });
 $("reset-btn").addEventListener("click", () => { $("mark-section").style.display = "none"; closeMenu(); clearHover(); window.scrollTo({top:0, behavior:"smooth"}); });
 const pv = $("poem-view");
 pv.addEventListener("mousemove", onMove);
